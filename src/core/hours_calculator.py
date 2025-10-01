@@ -305,7 +305,7 @@ class ArgentineHoursCalculator:
 
 
 
-            if fuera_de_convenio == False: 
+            if fuera_de_convenio == False and hours_worked > 0: 
                 viatico += 1
                 comida += 1 
 
