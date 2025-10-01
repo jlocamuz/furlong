@@ -1,10 +1,3 @@
-"""
-Configuración por defecto del sistema
-Valores heredados del proyecto anterior Horas-cat-v3
-"""
-
-# --- Feriados 2025 (Argentina) ---
-# Formato YYYY-MM-DD
 HOLIDAYS_2025 = [
     "2025-01-01",  # Año Nuevo
 
@@ -97,10 +90,9 @@ HOLIDAY_NAMES_2025 = {
 }
 
 
-
 DEFAULT_CONFIG = {
-    # API
-    'api_key': 'NTgyNTM5NTpuYzhJSXFQNEUzeXZNcndpNzVCR3ZJYm4wTkJ2aWpXTg==',
+    # API furlong
+    'api_key': 'NTc4NzIyOTp1Q0pFYTZCdElPZ3FBWmtjV2RfdTAzdzZ6NjNHbEFXTQ==',
     'base_url': 'https://api-prod.humand.co/public/api/v1',
 
     "local_timezone": "America/Argentina/Buenos_Aires",

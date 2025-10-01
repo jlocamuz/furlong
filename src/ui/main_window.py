@@ -1293,10 +1293,6 @@ def parse_args():
 
 def main():
 
-    # Priorizamos CLI > ENV > default
-    api_key = "NTc4NzIyOTp1Q0pFYTZCdElPZ3FBWmtjV2RfdTAzdzZ6NjNHbEFXTQ=="
-    DEFAULT_CONFIG['api_key'] = api_key
-
     print("🔑 API Key en uso:", DEFAULT_CONFIG['api_key'])
     """Función principal para ejecutar la aplicación"""
 
