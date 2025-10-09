@@ -1,6 +1,6 @@
 """
 Generador de archivos Excel usando Pandas
-Versión con columnas de horas en formato hh:mm (tiempo real de Excel)
+Solo muestra los datos calculados por hours_calculator
 """
 
 import os
@@ -26,6 +26,13 @@ class ExcelReportGenerator:
             return round((float(hours) if hours else 0.0) / 24.0, 10)
         except Exception:
             return 0.0
+
+    def _only_hhmm(self, value) -> str:
+        """Devuelve 'HH:MM' si lo encuentra dentro de value; si no, ''."""
+        if not value:
+            return ""
+        m = re.search(r'([01]\d|2[0-3]):[0-5]\d', str(value))
+        return m.group(0) if m else ""
 
     def generate_report(self, processed_data: Dict, start_date: str, end_date: str, output_filename: str = None) -> str:
         """Genera el reporte Excel usando pandas"""
@@ -83,13 +90,15 @@ class ExcelReportGenerator:
                 'Horas Extra 100%': self.hours_to_excel_time(totals.get('total_extra_hours_100', 0.0)),
                 'Horas Nocturnas': self.hours_to_excel_time(totals.get('total_night_hours', 0.0)),
                 'Horas Feriado': self.hours_to_excel_time(totals.get('total_holiday_hours', 0.0)),
+                'Total Tardanzas': self.hours_to_excel_time(totals.get('total_tardanza_horas', 0.0)),
+                'Total Retiros Anticipados': self.hours_to_excel_time(totals.get('total_retiro_anticipado_horas', 0.0)),
             }
             summary_rows.append(row)
 
         return summary_rows
 
     def _prepare_daily_data(self, processed_data: Dict) -> list:
-        """Prepara datos para la hoja de detalle diario (horas como tiempo Excel con hh:mm)"""
+        """Prepara datos para la hoja de detalle diario - Solo muestra los datos ya calculados"""
         daily_rows = []
 
         for emp in processed_data.values():
@@ -98,26 +107,26 @@ class ExcelReportGenerator:
             for d in emp['daily_data']:
                 # Observaciones
                 observations = []
+
+                
                 if d.get('is_holiday'):
                     observations.append(f"Feriado: {d.get('holiday_name') or 'N/A'}")
                 if d.get('has_time_off'):
                     observations.append(f"Licencia: {d.get('time_off_name') or 'N/A'}")
                 if d.get('has_absence'):
-                    observations.append("Ausencia")
-                # OJO: d['pending_hours'] puede ser float; mostramos aparte como hh:mm en Excel
-                if (d.get('pending_hours') or 0) > 0:
-                    observations.append("Horas pendientes")
+                    observations.append("AUSENCIA SIN AVISO")
 
                 row = {
                     'Legajo': info.get('employeeInternalId', ''),
                     'Apellido, Nombre': info.get('lastName', '') + ', ' + info.get('firstName', ''),
-                    'Fecha': d.get('day_of_week', '') + ' ' +d.get('date', ''),
+                    'Fecha': d.get('day_of_week', '') + ' ' + d.get('date', ''),
                     'Horario obligatorio': d.get('time_range'),
                     'Fichadas': self._only_hhmm(d.get('shift_start', '')) + ' - ' + self._only_hhmm(d.get('shift_end', '')),
+                    'Observaciones': ', '.join(observations) if observations else '',
 
-                    # Horas en formato Excel (fracción del día) + luego formato hh:mm en la hoja
+                    # Horas en formato Excel (ya calculadas en hours_calculator)
                     'Horas Trabajadas': self.hours_to_excel_time(d.get('hours_worked', 0.0)),
-                    'Horas extra': self.hours_to_excel_time(d.get('extra_hours')),
+                    'Horas extra': self.hours_to_excel_time(d.get('extra_hours', 0.0)),
                     'Horas Regulares': self.hours_to_excel_time(d.get('regular_hours', 0.0)),
                     'Horas Extra 50%': self.hours_to_excel_time(d.get('extra_hours_50', 0.0)),
                     'Horas Extra 100%': self.hours_to_excel_time(d.get('extra_hours_100', 0.0)),
@@ -126,13 +135,16 @@ class ExcelReportGenerator:
                     'viatico': d.get('viatico'),
                     'comida': d.get('comida'),
                     'Horas Feriado': self.hours_to_excel_time(d.get('holiday_hours', 0.0)),
-                    'Horas Pendientes': self.hours_to_excel_time(d.get('pending_hours', 0.0)),
                     'Es Franco': 'Sí' if d.get('is_rest_day') else 'No',
                     'Es Feriado': 'Sí' if d.get('is_holiday') else 'No',
                     'Nombre Feriado': d.get('holiday_name') or '',
                     'Tiene Licencia': 'Sí' if d.get('has_time_off') else 'No',
                     'Tipo Licencia': d.get('time_off_name') or '',
-                    'Observaciones': ', '.join(observations) if observations else '',
+                    
+                    # Tardanza y Retiro Anticipado YA calculados en hours_calculator
+                    'Tardanza': self.hours_to_excel_time(d.get('tardanza_horas', 0.0)),
+                    'Retiro Anticipado': self.hours_to_excel_time(d.get('retiro_anticipado_horas', 0.0)),
+                    
                 }
                 daily_rows.append(row)
 
@@ -177,7 +189,10 @@ class ExcelReportGenerator:
         worksheet.write(2, 0, f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}", title_format)
 
         # Columnas que deben mostrarse como tiempo
-        time_cols = {'Total Horas', 'Horas Regulares', 'Horas Extra 50%', 'Horas Extra 100%', 'Horas Nocturnas', 'Horas Feriado'}
+        time_cols = {
+            'Total Horas', 'Horas Regulares', 'Horas Extra 50%', 'Horas Extra 100%', 
+            'Horas Nocturnas', 'Horas Feriado', 'Total Tardanzas', 'Total Retiros Anticipados'
+        }
 
         # Encabezados (fila 3)
         for col_num, col_name in enumerate(df.columns):
@@ -201,12 +216,6 @@ class ExcelReportGenerator:
             else:
                 worksheet.set_column(col_num, col_num, 18)
 
-    def _only_hhmm(self, value) -> str:
-        """Devuelve 'HH:MM' si lo encuentra dentro de value; si no, ''."""
-        if not value:
-            return ""
-        m = re.search(r'([01]\d|2[0-3]):[0-5]\d', str(value))
-        return m.group(0) if m else ""
     def _format_daily_sheet(self, writer, df, start_date, end_date):
         """Aplica formato a la hoja de detalle diario"""
         workbook = writer.book
@@ -227,7 +236,8 @@ class ExcelReportGenerator:
         # Columnas con tiempos
         time_cols = {
             'Horas Trabajadas', 'Horas Regulares', 'Horas Extra 50%',
-            'Horas Extra 100%', 'Horas Nocturnas', 'Horas Feriado', 'Horas Pendientes', 'Tiene Licencia', 'Tipo Licencia', 'Es Feriado', 'Horas extra'
+            'Horas Extra 100%', 'Horas Nocturnas', 'Horas Feriado', 
+            'Horas extra', 'Tardanza', 'Retiro Anticipado'
         }
 
         # Encabezados (fila 3)

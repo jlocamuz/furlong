@@ -1,5 +1,6 @@
 """
 Calculador de Horas según Normativa Argentina
+Incluye cálculo de Tardanza y Retiro Anticipado
 """
 
 from datetime import datetime, timedelta
@@ -7,6 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo  # stdlib (Python >=3.9)
 from config.default_config import DEFAULT_CONFIG
 import math
+import re
 
 class ArgentineHoursCalculator:
     """Calculador de horas según normativa laboral argentina"""
@@ -38,6 +40,7 @@ class ArgentineHoursCalculator:
         if abs(valor % 1 - 0.75) < 1e-9:
             return math.floor(valor) + 1
         return valor
+    
     def _get_ref_str(self, day_summary: Dict) -> str:
         ref = day_summary.get('referenceDate') or day_summary.get('date') or ''
         return ref[:10]
@@ -172,7 +175,111 @@ class ArgentineHoursCalculator:
 
         return {'regular': regular, 'extra50': e50, 'extra100': e100, 'pending': pending}
     
-        # -------------------- Cálculo principal --------------------
+    # -------------------- Cálculo de Tardanza y Retiro Anticipado --------------------
+    
+    def _only_hhmm(self, value) -> str:
+        """Devuelve 'HH:MM' si lo encuentra dentro de value; si no, ''."""
+        if not value:
+            return ""
+        m = re.search(r'([01]\d|2[0-3]):[0-5]\d', str(value))
+        return m.group(0) if m else ""
+
+    def _calcular_tardanza_minutos(self, time_range: str, shift_start: str) -> float:
+        """
+        Calcula la tardanza en minutos.
+        time_range: "08:30 - 17:15"
+        shift_start: "2025-01-15 08:55" (puede incluir fecha completa)
+        Retorna: minutos de tardanza (0 si llegó a tiempo o antes)
+        """
+        if not time_range or not shift_start:
+            return 0.0
+        
+        try:
+            # Extraer hora de inicio del horario obligatorio
+            hora_obligatoria = time_range.split('-')[0].strip()
+            h_oblig, m_oblig = map(int, hora_obligatoria.split(':'))
+            
+            # Extraer hora real de fichada
+            hora_real = self._only_hhmm(shift_start)
+            if not hora_real:
+                return 0.0
+            h_real, m_real = map(int, hora_real.split(':'))
+            
+            # Convertir a minutos totales
+            minutos_obligatorio = h_oblig * 60 + m_oblig
+            minutos_real = h_real * 60 + m_real
+            
+            # Calcular tardanza en minutos
+            tardanza_mins = minutos_real - minutos_obligatorio
+            return max(0.0, float(tardanza_mins))
+            
+        except Exception:
+            return 0.0
+
+    def _calcular_retiro_anticipado_minutos(self, time_range: str, shift_start: str, shift_end: str) -> float:
+        """
+        Calcula el retiro anticipado en minutos.
+        Maneja correctamente turnos nocturnos que cruzan medianoche.
+        
+        time_range: "08:00 - 16:45"
+        shift_start: "2025-01-15 07:45" 
+        shift_end: "2025-01-16 03:45" (puede ser del día siguiente)
+        Retorna: minutos de retiro anticipado (0 si se fue a tiempo o después)
+        """
+        if not time_range or not shift_end:
+            return 0.0
+        
+        try:
+            # Extraer hora de fin del horario obligatorio
+            hora_obligatoria = time_range.split('-')[1].strip()
+            h_oblig, m_oblig = map(int, hora_obligatoria.split(':'))
+            
+            # Extraer fechas y horas de las fichadas
+            hora_start = self._only_hhmm(shift_start) if shift_start else None
+            hora_end = self._only_hhmm(shift_end)
+            
+            if not hora_end:
+                return 0.0
+            
+            # Extraer fechas completas si existen
+            fecha_start = None
+            fecha_end = None
+            
+            if shift_start and len(shift_start) >= 10:
+                try:
+                    fecha_start = datetime.strptime(shift_start[:10], '%Y-%m-%d').date()
+                except:
+                    pass
+                    
+            if shift_end and len(shift_end) >= 10:
+                try:
+                    fecha_end = datetime.strptime(shift_end[:10], '%Y-%m-%d').date()
+                except:
+                    pass
+            
+            # CASO 1: Si hay fechas y son diferentes (turno nocturno que cruza medianoche)
+            # NO calcular retiro anticipado porque es un turno nocturno válido
+            if fecha_start and fecha_end and fecha_end > fecha_start:
+                return 0.0
+            
+            # CASO 2: Mismo día o sin información de fecha - calcular normalmente
+            h_end, m_end = map(int, hora_end.split(':'))
+            
+            minutos_obligatorio = h_oblig * 60 + m_oblig
+            minutos_real = h_end * 60 + m_end
+            
+            # Calcular retiro anticipado en minutos
+            retiro_mins = minutos_obligatorio - minutos_real
+            return max(0.0, float(retiro_mins))
+            
+        except Exception:
+            return 0.0
+
+    def _minutos_a_horas(self, minutos: float) -> float:
+        """Convierte minutos a horas decimales"""
+        return round(minutos / 60.0, 2)
+
+    # -------------------- Cálculo principal --------------------
 
     def process_employee_data(self, day_summaries: List[Dict], employee_info: Dict,
                             previous_pending_hours: float = 0,
@@ -198,7 +305,9 @@ class ArgentineHoursCalculator:
             'total_extra_hours_100': 0.0,
             'total_night_hours': 0.0,
             'total_holiday_hours': 0.0,
-            'total_pending_hours': float(previous_pending_hours)
+            'total_pending_hours': float(previous_pending_hours),
+            'total_tardanza_horas': 0.0,
+            'total_retiro_anticipado_horas': 0.0
         }
 
         for day_summary in day_summaries:
@@ -209,22 +318,43 @@ class ArgentineHoursCalculator:
                 else None
             )
 
-
             ref_str = self._get_ref_str(day_summary)
             if not ref_str:
                 continue
             ref_dt = datetime.strptime(ref_str, '%Y-%m-%d')
             dow = ref_dt.weekday()  # 0=Lun … 6=Dom
 
+            hours_scheduled = float(day_summary.get('hours', {}).get('scheduled', 0) or 0)
+
             hours_worked = float(day_summary.get('hours', {}).get('worked', 0)
                                 or day_summary.get('totalHours', 0) or 0)
+            
             is_holiday_api = bool(day_summary.get('holidays'))
             has_time_off   = bool(day_summary.get('timeOffRequests'))
             has_absence    = 'ABSENT' in (day_summary.get('incidences') or [])
             is_rest_day    = not bool(day_summary.get('isWorkday', True))  # FRANCO
+            is_workday     = bool(day_summary.get('isWorkday', True))  # Día laboral
 
-            if hours_worked == 0 and not has_time_off:
+            # NUEVA LÓGICA: Si es día laboral, no trabajó y no tiene licencia -> Marcar "SIN AVISO"
+            sin_aviso = False
+            if is_workday and hours_worked == 0 and not has_time_off and not is_holiday_api:
+                sin_aviso = True
+                # NO hacer continue, queremos mostrar este registro
+            elif hours_worked == 0 and not has_time_off and not sin_aviso:
+                # Si no es día laboral y no trabajó, entonces sí omitir el registro
                 continue
+
+            # ---- Horarios de turno para display ----
+            disp_start_d, disp_start_h, disp_end_d, disp_end_h = self._display_from_entries(day_summary)
+            shift_start = " ".join([disp_start_d, disp_start_h]).strip()
+            shift_end = " ".join([disp_end_d, disp_end_h]).strip()
+
+            # ===== CALCULAR TARDANZA Y RETIRO ANTICIPADO =====
+            tardanza_mins = self._calcular_tardanza_minutos(time_range, shift_start)
+            retiro_mins = self._calcular_retiro_anticipado_minutos(time_range, shift_start, shift_end)
+            
+            tardanza_horas = self._minutos_a_horas(tardanza_mins)
+            retiro_horas = self._minutos_a_horas(retiro_mins)
 
             # ===== USAR HORAS CATEGORIZADAS DE LA API =====
             categorized_hours = day_summary.get('categorizedHours', [])
@@ -241,7 +371,6 @@ class ArgentineHoursCalculator:
                     extra_hours += hours
             
             # Para simplificar, consideramos todas las extras como 50% por defecto
-            # Podrías ajustar esta lógica según tus necesidades específicas
             extra50 = extra_hours
             extra100 = 0.0
             
@@ -249,12 +378,10 @@ class ArgentineHoursCalculator:
             if is_holiday_api or dow == 6 or is_rest_day:  # Feriados, domingos, francos
                 extra100 = extra_hours
                 extra50 = 0.0
-            elif dow == 5:  # Sábados - lógica especial si es necesaria
-                # Puedes mantener la lógica de sábado o simplificar
-                # Por ahora, mantenemos 50% por defecto
+            elif dow == 5:  # Sábados
                 pass
 
-            # Feriado por fin local (mantener la lógica existente si es necesaria)
+            # Feriado por fin local
             end_holiday_str = self._crosses_into_holiday_local_end(day_summary, ref_str, holiday_dates)
             is_ref_holiday_cfg = ref_str in holiday_dates
             is_out_holiday_cfg = bool(end_holiday_str)
@@ -269,20 +396,18 @@ class ArgentineHoursCalculator:
                 holiday_name = self._get_holiday_name(out_date_str, day_summary) or \
                             self._get_holiday_name(ref_str, day_summary)
 
-            # Intervalos y horas nocturnas (mantener lógica existente)
+            # Intervalos y horas nocturnas
             intervals = self._get_intervals_from_entries(day_summary)
             night_hours = self._compute_night_hours_from_intervals(intervals, ref_dt) \
                         if intervals else 0.0
 
-            # Horas "feriado" (solo si es feriado, no domingo)
+            # Horas "feriado"
             holiday_hours = hours_worked if is_holiday_output else 0.0
 
-            # Calcular horas pendientes (solo si no llegó a las regulares esperadas)
+            # Calcular horas pendientes
             pending = 0.0
             if not has_time_off and not has_absence and regular_hours > 0:
-                # Usar las horas regulares categorizadas como referencia
-                # Si trabajó menos regulares de las esperadas, calcular pendientes
-                expected_regular = self.jornada_completa  # Mantener como referencia interna
+                expected_regular = self.jornada_completa
                 if regular_hours < expected_regular:
                     pending = expected_regular - regular_hours
 
@@ -290,7 +415,6 @@ class ArgentineHoursCalculator:
             if fuera_de_convenio:
                 if extra50 > 0 or extra100 > 0:
                     print(f"   Día {ref_str}: Anulando {extra50 + extra100:.1f}h extras (FUERA DE CONVENIO)")
-                regular_hours += extra100 + extra50
                 extra50 = 0.0
                 extra100 = 0.0
 
@@ -298,17 +422,13 @@ class ArgentineHoursCalculator:
             comida = 0
             horas_150 = 0
 
-
             # caso toyota
             if time_range == "16:00 - 00:45" and dow == 5 or dow == 6 and hours_worked > 6:
                 horas_150 += extra_hours 
 
-
-
-            if fuera_de_convenio == False and hours_worked > 0: 
+            if fuera_de_convenio == False and hours_worked > (hours_scheduled / 2): 
                 viatico += 1
                 comida += 1 
-
             else: 
                 viatico = None
                 comida = None
@@ -321,11 +441,11 @@ class ArgentineHoursCalculator:
             totals['total_extra_hours_100'] += extra100
             totals['total_night_hours']     += night_hours
             totals['total_holiday_hours']   += holiday_hours
+            totals['total_tardanza_horas']  += tardanza_horas
+            totals['total_retiro_anticipado_horas'] += retiro_horas
+            
             if not has_time_off and not has_absence:
                 totals['total_pending_hours'] += pending
-
-            # ---- Horarios de turno para display ----
-            disp_start_d, disp_start_h, disp_end_d, disp_end_h = self._display_from_entries(day_summary)
 
             # Agregar entrada diaria
             daily_data.append({
@@ -344,19 +464,21 @@ class ArgentineHoursCalculator:
                 'night_hours': night_hours,
                 'holiday_hours': holiday_hours,
                 'pending_hours': pending if not (has_time_off or has_absence) else 0.0,
+                'tardanza_horas': tardanza_horas,
+                'retiro_anticipado_horas': retiro_horas,
                 'is_holiday': is_holiday_output,
                 'holiday_name': holiday_name,
                 'is_rest_day': bool(is_rest_day),
                 'has_time_off': has_time_off,
                 'time_off_name': (day_summary.get('timeOffRequests') or [{}])[0].get('name') if has_time_off else None,
                 'has_absence': has_absence,
-                'is_full_time': hours_worked >= regular_hours,  # Cambiado para usar horas regulares reales
-                'shift_start': " ".join([disp_start_d, disp_start_h]).strip(),
-                'shift_end':   " ".join([disp_end_d,   disp_end_h]).strip(),
+                'is_full_time': hours_worked >= regular_hours,
+                'shift_start': shift_start,
+                'shift_end': shift_end,
                 'time_range': time_range
             })
 
-        # Calcular compensaciones AL FINAL (fuera del bucle)
+        # Calcular compensaciones AL FINAL
         compensations = self.calculate_compensations(
             totals['total_extra_hours_50'],
             totals['total_extra_hours_100'],
@@ -370,14 +492,11 @@ class ArgentineHoursCalculator:
             'compensations': compensations
         }
 
-
-
     def calculate_hour_distribution(self, hours_worked: float, date: datetime,
                                     is_holiday: bool = False, has_time_off: bool = False,
                                     night_hours: float = 0.0) -> Dict:
         """
-        Mantengo por compatibilidad, pero la rama de sábado ahora se maneja en process_employee_data
-        con cortes por intervalo. Para Lun–Vie usa extras_al_50 de config.
+        Mantengo por compatibilidad
         """
         if hours_worked == 0:
             return {
@@ -389,7 +508,7 @@ class ArgentineHoursCalculator:
                 'pending_hours': 0.0
             }
 
-        day_of_week = date.weekday()  # 0=Lun … 6=Dom
+        day_of_week = date.weekday()
         if day_of_week == 6:
             return {
                 'hours_worked': float(hours_worked),
@@ -400,7 +519,6 @@ class ArgentineHoursCalculator:
                 'pending_hours': 0.0
             }
 
-        # Lun–Vie (y sábado simplificado antiguo eliminado)
         dist = self._weekday_distribution(float(hours_worked), has_time_off)
         return {
             'hours_worked': float(hours_worked),
